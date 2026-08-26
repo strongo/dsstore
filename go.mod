@@ -1,5 +1,7 @@
 module github.com/strongo/dsstore
 
-go 1.27.0
+go 1.26.0
+
+toolchain go1.27.0
 
 require golang.org/x/text v0.41.0
