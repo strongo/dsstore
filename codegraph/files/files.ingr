@@ -5,12 +5,6 @@
 661
 0
 null
-".github/workflows/qodana_code_quality.yml"
-"c0ac4e9eead5bc84bd05ccb61d0c5c0fc13e940635c1b7fcb88923e5cfb694f3"
-"yaml"
-982
-0
-null
 ".github/workflows/release.yml"
 "55fab84942b26883de3b2eb86a59d673ece93ed0c8b4e3ebe74cb4369a1d67cc"
 "yaml"
@@ -28,12 +22,6 @@ null
 "go"
 3519
 10
-null
-"qodana.yaml"
-"f406b9518aa0f08c3c90a7b3301324aab827e7fd572647e5b1ce8c2d6c355219"
-"yaml"
-480
-0
 null
 "reader.go"
 "cd8a05662443830693d79b44d6beceb7ba829494472488cddbf0307deaef30db"
@@ -59,4 +47,4 @@ null
 3066
 11
 null
-# 10 records
+# 8 records
