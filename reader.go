@@ -13,15 +13,14 @@ import (
 )
 
 func (s *Store) readBlock(fileData []byte, offset, size uint32) *bytes.Buffer {
-	// check size
-	if offset+4+size > uint32(len(fileData)) {
+	if int(offset+4+size) > len(fileData) {
 		return nil
 	}
-	// alloc reading buffer
 	return bytes.NewBuffer(fileData[offset+4 : offset+4+size])
 }
 
 func (s *Store) readOffsets(b *bytes.Buffer) ([]uint32, error) {
+	// read count
 	var count uint32
 	if err := binary.Read(b, binary.BigEndian, &count); err != nil {
 		return nil, err
@@ -64,7 +63,7 @@ func (s *Store) readTopics(b *bytes.Buffer) (map[string]uint32, error) {
 		}
 		// read topic name
 		name := make([]byte, readBytesCount)
-		_, err = b.Read(name)
+		_, err = io.ReadFull(b, name)
 		if err != nil {
 			return nil, err
 		}
@@ -107,7 +106,7 @@ func (s *Store) readParseFile(b *bytes.Buffer) (Record, error) {
 	}
 	// name
 	name16 := make([]byte, 2*lenBytes)
-	if _, err := b.Read(name16); err != nil {
+	if _, err := io.ReadFull(b, name16); err != nil {
 		return r, err
 	}
 	// extra
@@ -116,7 +115,7 @@ func (s *Store) readParseFile(b *bytes.Buffer) (Record, error) {
 	}
 	// type
 	stype := make([]byte, 4)
-	if _, err := b.Read(stype); err != nil {
+	if _, err := io.ReadFull(b, stype); err != nil {
 		return r, err
 	}
 	r.Type = string(stype)
@@ -147,13 +146,10 @@ func (s *Store) readParseFile(b *bytes.Buffer) (Record, error) {
 		return r, fmt.Errorf("unknown record format [%s]", r.Type)
 	}
 	r.Data = make([]byte, byteToRead)
-	if _, err := b.Read(r.Data); err != nil {
+	if _, err := io.ReadFull(b, r.Data); err != nil {
 		return r, err
 	}
-	name, _, err := transform.Bytes(unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM).NewDecoder(), name16)
-	if err != nil {
-		return r, err
-	}
+	name, _, _ := transform.Bytes(unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM).NewDecoder(), name16)
 	r.FileName = string(name)
 	return r, nil
 }
@@ -223,36 +219,19 @@ func (s *Store) readParseDSDB(fileData []byte, offsets []uint32, topics map[stri
 	if blockDSDB == nil {
 		return errors.New("invalid DSDB block")
 	}
-	// read data root node
-	var dataRoot uint32
-	err := binary.Read(blockDSDB, binary.BigEndian, &dataRoot)
-	if err != nil {
-		return err
+	if blockDSDB.Len() < 20 {
+		return errors.New("invalid DSDB block")
 	}
-	// just reading
-	var levels uint32
-	if err = binary.Read(blockDSDB, binary.BigEndian, &levels); err != nil {
-		return err
-	}
-	var records uint32
-	if err = binary.Read(blockDSDB, binary.BigEndian, &records); err != nil {
-		return err
-	}
-	var nodes uint32
-	if err = binary.Read(blockDSDB, binary.BigEndian, &nodes); err != nil {
-		return err
-	}
-	var dummy uint32
-	if err = binary.Read(blockDSDB, binary.BigEndian, &dummy); err != nil {
-		return err
-	}
+	dataRoot := binary.BigEndian.Uint32(blockDSDB.Next(4))
+	_ = binary.BigEndian.Uint32(blockDSDB.Next(4)) // levels
+	_ = binary.BigEndian.Uint32(blockDSDB.Next(4)) // records
+	_ = binary.BigEndian.Uint32(blockDSDB.Next(4)) // nodes
+	dummy := binary.BigEndian.Uint32(blockDSDB.Next(4))
 	if dummy != 0x1000 {
 		return errors.New("invalid DSDB block")
 	}
 	// read extra
-	if s.DSDBExtra, err = io.ReadAll(blockDSDB); err != nil {
-		return err
-	}
+	s.DSDBExtra, _ = io.ReadAll(blockDSDB)
 	// parse data
 	return s.readParseData(fileData, offsets, dataRoot)
 }
@@ -277,9 +256,7 @@ func (s *Store) readParseRoot(fileData []byte, offset, size uint32) error {
 		return err
 	}
 	// read extra root data
-	if s.RootExtra, err = io.ReadAll(blockRoot); err != nil {
-		return err
-	}
+	s.RootExtra, _ = io.ReadAll(blockRoot)
 	// parse DSDB
 	return s.readParseDSDB(fileData, offsets, topics)
 }
@@ -301,41 +278,21 @@ func (s *Store) Read(r io.Reader) error {
 	if fileSize < 36 {
 		return errors.New("invalid file header")
 	}
-	blockHeader := bytes.NewBuffer(fileData[:36])
-	var headerMagic, headerOffset1, headerSize, headerOffset2 uint32
-	// magic 1
-	if err := binary.Read(blockHeader, binary.BigEndian, &headerMagic); err != nil {
-		return err
-	}
-	if headerMagic != headerMagic1 {
+	headerMagic1Val := binary.BigEndian.Uint32(fileData[0:4])
+	if headerMagic1Val != headerMagic1 {
 		return errors.New("invalid first magic")
 	}
-	// magic 2
-	if err := binary.Read(blockHeader, binary.BigEndian, &headerMagic); err != nil {
-		return err
-	}
-	if headerMagic != headerMagic2 {
+	headerMagic2Val := binary.BigEndian.Uint32(fileData[4:8])
+	if headerMagic2Val != headerMagic2 {
 		return errors.New("invalid second magic")
 	}
-	// offset1
-	if err := binary.Read(blockHeader, binary.BigEndian, &headerOffset1); err != nil {
-		return err
-	}
-	// size
-	if err := binary.Read(blockHeader, binary.BigEndian, &headerSize); err != nil {
-		return err
-	}
-	// offset2
-	if err := binary.Read(blockHeader, binary.BigEndian, &headerOffset2); err != nil {
-		return err
-	}
+	headerOffset1 := binary.BigEndian.Uint32(fileData[8:12])
+	headerSize := binary.BigEndian.Uint32(fileData[12:16])
+	headerOffset2 := binary.BigEndian.Uint32(fileData[16:20])
 	if headerOffset1 != headerOffset2 {
 		return errors.New("invalid header offset")
 	}
-	// read header extra
-	if s.HeaderExtra, err = io.ReadAll(blockHeader); err != nil {
-		return err
-	}
+	s.HeaderExtra = bytes.Clone(fileData[20:36])
 	// parse root (bookkeeping) block
 	return s.readParseRoot(fileData, headerOffset1, headerSize)
 }

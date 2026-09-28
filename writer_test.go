@@ -3,6 +3,7 @@ package dsstore
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"path/filepath"
 	"testing"
 )
@@ -121,21 +122,65 @@ func TestWriteFreeBlocksMultiple(t *testing.T) {
 	for i := uint32(0); i < 40; i++ {
 		freeBlocks = append(freeBlocks, freeBlock{offset: i * 1024, size: 1024})
 	}
-	err := s.writeFreeBlocks(buf, freeBlocks)
-	if err != nil {
-		t.Fatalf("writeFreeBlocks failed: %v", err)
-	}
+	s.writeFreeBlocks(buf, freeBlocks)
 }
 
 func TestWriteAlignBlock(t *testing.T) {
 	s := &Store{}
 	buf := new(bytes.Buffer)
 	buf.WriteByte(1)
-	err := s.writeAlignBlock(buf, 8)
-	if err != nil {
-		t.Fatalf("writeAlignBlock failed: %v", err)
-	}
+	s.writeAlignBlock(buf, 8)
 	if buf.Len() != 8 {
 		t.Errorf("expected length 8, got %d", buf.Len())
 	}
 }
+
+type failWriter struct{}
+
+func (failWriter) Write(p []byte) (int, error) {
+	return 0, io.ErrShortWrite
+}
+
+func TestWriteError(t *testing.T) {
+	s := &Store{}
+	if err := s.Write(failWriter{}); err == nil {
+		t.Fatal("expected error on failing writer")
+	}
+}
+
+func TestWriteFreeMapAlloc(t *testing.T) {
+	s := &Store{}
+	// Empty slice returns 0
+	val, _ := s.writeFreeMapAlloc(nil, 64, 64)
+	if val != 0 {
+		t.Fatalf("expected 0 for empty free blocks, got %d", val)
+	}
+
+	// Partly used block matching powCapacity where block.size > powSize
+	fb := []freeBlock{{offset: 128, size: 64}}
+	allocated, remaining := s.writeFreeMapAlloc(fb, 32, 64)
+	if allocated == 0 {
+		t.Fatal("expected successful allocation")
+	}
+	if len(remaining) != 1 || remaining[0].size != 32 {
+		t.Fatalf("expected remaining block of size 32, got %+v", remaining)
+	}
+
+	// Partly used block matching powCapacity where block.size == powSize
+	fb2 := []freeBlock{{offset: 256, size: 64}}
+	allocated2, remaining2 := s.writeFreeMapAlloc(fb2, 64, 64)
+	if allocated2 == 0 {
+		t.Fatal("expected successful allocation")
+	}
+	if len(remaining2) != 0 {
+		t.Fatalf("expected 0 remaining blocks, got %+v", remaining2)
+	}
+
+	// writeFreeMapSort equality branch
+	sortBlocks := []freeBlock{{offset: 200, size: 100}, {offset: 100, size: 100}}
+	s.writeFreeMapSort(sortBlocks)
+	if sortBlocks[0].offset != 100 {
+		t.Fatalf("expected offset 100 first, got %d", sortBlocks[0].offset)
+	}
+}
+

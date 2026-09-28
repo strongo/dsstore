@@ -3,6 +3,7 @@ package dsstore
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"path/filepath"
 	"testing"
 )
@@ -305,3 +306,192 @@ func TestReadFreeBlocksNonZero(t *testing.T) {
 		t.Fatalf("readFreeBlocks failed: %v", err)
 	}
 }
+
+type failReader struct{}
+
+func (failReader) Read(p []byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestReadIOError(t *testing.T) {
+	var s Store
+	if err := s.Read(failReader{}); err == nil {
+		t.Fatal("expected error with failReader")
+	}
+}
+
+func TestReadOffsetsErrors(t *testing.T) {
+	s := &Store{}
+	// Dummy read fails
+	buf := bytes.NewBuffer([]byte{0, 0, 0, 1})
+	if _, err := s.readOffsets(buf); err == nil {
+		t.Fatal("expected error on dummy read failure")
+	}
+
+	// Offset read in loop fails
+	buf = bytes.NewBuffer([]byte{0, 0, 0, 1, 0, 0, 0, 0})
+	if _, err := s.readOffsets(buf); err == nil {
+		t.Fatal("expected error on offset read failure")
+	}
+}
+
+func TestReadTopicsErrors(t *testing.T) {
+	s := &Store{}
+	// ReadByte fails
+	buf := bytes.NewBuffer([]byte{0, 0, 0, 1})
+	if _, err := s.readTopics(buf); err == nil {
+		t.Fatal("expected error on topic ReadByte failure")
+	}
+
+	// ReadFull name fails
+	buf = bytes.NewBuffer([]byte{0, 0, 0, 1, 5, 'a', 'b'})
+	if _, err := s.readTopics(buf); err == nil {
+		t.Fatal("expected error on topic name failure")
+	}
+
+	// Index read fails
+	buf = bytes.NewBuffer([]byte{0, 0, 0, 1, 1, 'a'})
+	if _, err := s.readTopics(buf); err == nil {
+		t.Fatal("expected error on topic index failure")
+	}
+}
+
+func TestReadFreeBlocksValueFailure(t *testing.T) {
+	s := &Store{}
+	// 32 counts, but the first count is 1 with no value following
+	buf := bytes.NewBuffer([]byte{0, 0, 0, 1})
+	if err := s.readFreeBlocks(buf); err == nil {
+		t.Fatal("expected error on free blocks value read failure")
+	}
+}
+
+func TestReadParseFileErrors(t *testing.T) {
+	s := &Store{}
+	// lenBytes failure
+	if _, err := s.readParseFile(bytes.NewBuffer(nil)); err == nil {
+		t.Fatal("expected error on lenBytes")
+	}
+
+	// name16 failure (lenBytes=2, needs 4 bytes, only 1 provided)
+	if _, err := s.readParseFile(bytes.NewBuffer([]byte{0, 0, 0, 2, 0})); err == nil {
+		t.Fatal("expected error on name16")
+	}
+
+	// extra failure (lenBytes=1, name16=2 bytes, no extra)
+	if _, err := s.readParseFile(bytes.NewBuffer([]byte{0, 0, 0, 1, 0, 'a'})); err == nil {
+		t.Fatal("expected error on extra")
+	}
+
+	// stype failure (lenBytes=1, name16=2 bytes, extra=4 bytes, only 2 stype bytes)
+	prefix := []byte{0, 0, 0, 1, 0, 'a', 0, 0, 0, 0}
+	if _, err := s.readParseFile(bytes.NewBuffer(append(prefix, 'b', 'o'))); err == nil {
+		t.Fatal("expected error on stype")
+	}
+
+	// blob dataLen failure
+	blobPrefix := append(prefix, []byte("blob")...)
+	if _, err := s.readParseFile(bytes.NewBuffer(blobPrefix)); err == nil {
+		t.Fatal("expected error on blob dataLen")
+	}
+
+	// ustr dataLen failure
+	ustrPrefix := append(prefix, []byte("ustr")...)
+	if _, err := s.readParseFile(bytes.NewBuffer(ustrPrefix)); err == nil {
+		t.Fatal("expected error on ustr dataLen")
+	}
+
+	// data failure (e.g. bool type needs 1 byte, none provided)
+	boolPrefix := append(prefix, []byte("bool")...)
+	if _, err := s.readParseFile(bytes.NewBuffer(boolPrefix)); err == nil {
+		t.Fatal("expected error on data read")
+	}
+}
+
+func TestReadParseDataErrors(t *testing.T) {
+	s := &Store{}
+	fileData := make([]byte, 512)
+
+	// Short block for nextNode (size is 1<<0 = 1 byte, nextNode needs 4 bytes)
+	shortOffsets := []uint32{0}
+	if err := s.readParseData(fileData, shortOffsets, 0); err == nil {
+		t.Fatal("expected error on nextNode read")
+	}
+
+	// Block with nextNode (4 bytes), but count fails (size is 1<<2 = 4 bytes)
+	if err := s.readParseData(fileData, []uint32{2}, 0); err == nil {
+		t.Fatal("expected error on count read")
+	}
+
+	// nextNode > 0: childNode read failure
+	binary.BigEndian.PutUint32(fileData[36:], 2)
+	binary.BigEndian.PutUint32(fileData[40:], 1)
+	if err := s.readParseData(fileData, []uint32{0, 32 + 3, 64 + 5}, 1); err == nil {
+		t.Fatal("expected error on childNode read")
+	}
+
+	// nextNode > 0: childNode recursion fails (childNode=99 out of range)
+	binary.BigEndian.PutUint32(fileData[36:], 2)  // nextNode
+	binary.BigEndian.PutUint32(fileData[40:], 1)  // count
+	binary.BigEndian.PutUint32(fileData[44:], 99) // invalid childNode
+	if err := s.readParseData(fileData, []uint32{0, 32 + 5, 64 + 5}, 1); err == nil {
+		t.Fatal("expected error on childNode recursion")
+	}
+
+	// nextNode > 0: childNode valid, but file data corrupt in current block
+	binary.BigEndian.PutUint32(fileData[68:], 0) // nextNode=0
+	binary.BigEndian.PutUint32(fileData[72:], 0) // count=0
+	binary.BigEndian.PutUint32(fileData[44:], 2) // childNode=2
+	// current block file data corrupt (e.g. truncated lenBytes at offset 48)
+	if err := s.readParseData(fileData, []uint32{0, 32 + 5, 64 + 5}, 1); err == nil {
+		t.Fatal("expected error on readParseFile")
+	}
+
+	// nextNode > 0: current block file is valid, but nextNode recursive call fails (nextNode=99)
+	binary.BigEndian.PutUint32(fileData[36:], 99) // invalid nextNode
+	binary.BigEndian.PutUint32(fileData[40:], 1)  // count
+	binary.BigEndian.PutUint32(fileData[44:], 2)  // childNode=2
+	// Valid file record at offset 48
+	binary.BigEndian.PutUint32(fileData[48:], 1) // lenBytes
+	fileData[52] = 0
+	fileData[53] = 'A'
+	binary.BigEndian.PutUint32(fileData[54:], 0) // extra
+	copy(fileData[58:], "bool")
+	fileData[62] = 1 // bool data
+	if err := s.readParseData(fileData, []uint32{0, 32 + 6, 64 + 5}, 1); err == nil {
+		t.Fatal("expected error on nextNode recursion")
+	}
+}
+
+func TestReadParseDSDBErrors(t *testing.T) {
+	s := &Store{}
+	for _, sizePow := range []uint32{0, 2, 3, 3, 4} {
+		fileData := make([]byte, 256)
+		offsets := []uint32{32 + sizePow}
+		topics := map[string]uint32{"DSDB": 0}
+		if err := s.readParseDSDB(fileData, offsets, topics); err == nil {
+			t.Fatalf("expected error on readParseDSDB with sizePow %d", sizePow)
+		}
+	}
+}
+
+func TestReadParseRootErrors(t *testing.T) {
+	s := &Store{}
+	fileData := make([]byte, 256)
+	if err := s.readParseRoot(fileData, 32, 2); err == nil {
+		t.Fatal("expected error on offsets failure in readParseRoot")
+	}
+
+	binary.BigEndian.PutUint32(fileData[36:], 0) // offsets count=0
+	binary.BigEndian.PutUint32(fileData[40:], 0) // offsets dummy
+	if err := s.readParseRoot(fileData, 32, 10); err == nil {
+		t.Fatal("expected error on topics failure in readParseRoot")
+	}
+
+	binary.BigEndian.PutUint32(fileData[36:], 0) // offsets count=0
+	binary.BigEndian.PutUint32(fileData[40:], 0) // offsets dummy
+	binary.BigEndian.PutUint32(fileData[44:], 0) // topics count=0
+	if err := s.readParseRoot(fileData, 32, 14); err == nil {
+		t.Fatal("expected error on free blocks failure in readParseRoot")
+	}
+}
+

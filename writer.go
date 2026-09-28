@@ -3,7 +3,6 @@ package dsstore
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"io"
 	"os"
 	"sort"
@@ -31,7 +30,7 @@ func (s *Store) writeFreeMapSort(freeBlocks []freeBlock) {
 		if freeBlocks[i].size < freeBlocks[j].size {
 			return true
 		}
-		if freeBlocks[i].size < freeBlocks[j].size {
+		if freeBlocks[i].size == freeBlocks[j].size {
 			return freeBlocks[i].offset < freeBlocks[j].offset
 		}
 		return false
@@ -84,165 +83,94 @@ func (s *Store) writeFreeMapAlloc(freeBlocks []freeBlock, size uint32, capacity 
 	return 0, freeBlocks
 }
 
-func (s *Store) writeAlignBlock(b *bytes.Buffer, minSize uint32) error {
+func (s *Store) writeAlignBlock(b *bytes.Buffer, minSize uint32) {
 	var lenBytes = uint32(b.Len())
 	for i := 0; i < 32; i++ {
 		var aligned uint32 = 1 << i
 		if lenBytes <= aligned && minSize <= aligned {
 			// add dummy bytes
-			if _, err := b.Write(make([]byte, aligned-lenBytes)); err != nil {
-				return err
-			}
+			b.Write(make([]byte, aligned-lenBytes))
 			break
 		}
 	}
-	return nil
 }
 
-func (s *Store) writeBlockData(b *bytes.Buffer, records []Record) error {
+func (s *Store) writeBlockData(b *bytes.Buffer, records []Record) {
 	// nextBlock is always 0. Storing all records in the one block
-	if err := binary.Write(b, binary.BigEndian, uint32(0)); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(0))
 	// count of records
-	if err := binary.Write(b, binary.BigEndian, uint32(len(records))); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(len(records)))
 	// records
 	for _, r := range records {
 		// r.FileName
-		n, _, err := transform.Bytes(unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM).NewEncoder(), []byte(r.FileName))
-		if err != nil {
-			return err
-		}
-		if err := binary.Write(b, binary.BigEndian, uint32(len(n)/2)); err != nil {
-			return err
-		}
-		if _, err := b.Write(n); err != nil {
-			return err
-		}
+		n, _, _ := transform.Bytes(unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM).NewEncoder(), []byte(r.FileName))
+		_ = binary.Write(b, binary.BigEndian, uint32(len(n)/2))
+		b.Write(n)
 		// unknown extra 4 bytes
-		if err := binary.Write(b, binary.BigEndian, uint32(r.Extra)); err != nil {
-			return err
-		}
+		_ = binary.Write(b, binary.BigEndian, uint32(r.Extra))
 		// r.Type (4-bytes string)
 		t := make([]byte, 4)
 		copy(t, []byte(r.Type))
-		if _, err := b.Write(t); err != nil {
-			return err
-		}
+		b.Write(t)
 		// r.DataLen for blob, ustr etc
 		if r.DataLen > 0 {
-			if err := binary.Write(b, binary.BigEndian, uint32(r.DataLen)); err != nil {
-				return err
-			}
+			_ = binary.Write(b, binary.BigEndian, uint32(r.DataLen))
 		}
 		// r.Data
-		if _, err := b.Write(r.Data); err != nil {
-			return err
-		}
+		b.Write(r.Data)
 	}
-	return nil
 }
 
-func (s *Store) writeBlockDSDB(b *bytes.Buffer, index uint32) error {
+func (s *Store) writeBlockDSDB(b *bytes.Buffer, index uint32) {
 	// write data block index
-	err := binary.Write(b, binary.BigEndian, index)
-	if err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, index)
 	// levels. always is 0
-	if err = binary.Write(b, binary.BigEndian, uint32(0)); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(0))
 	// records
-	if err = binary.Write(b, binary.BigEndian, uint32(len(s.Records))); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(len(s.Records)))
 	// nodes. always is 1 (storing all data in one data block)
-	if err = binary.Write(b, binary.BigEndian, uint32(1)); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(1))
 	// dummy 0x1000 value
-	if err = binary.Write(b, binary.BigEndian, uint32(0x1000)); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(0x1000))
 	// other unknown data
-	if _, err := b.Write(s.DSDBExtra); err != nil {
-		return err
-	}
-	return nil
+	b.Write(s.DSDBExtra)
 }
 
-func (s *Store) writeOffsets(b *bytes.Buffer, offsetRoot, offsetDBDS, offsetData uint32) error {
+func (s *Store) writeOffsets(b *bytes.Buffer, offsetRoot, offsetDBDS, offsetData uint32) {
 	// count of offset. always 3 blocks only
-	if err := binary.Write(b, binary.BigEndian, uint32(3)); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(3))
 	// dummy 4 bytes
-	if err := binary.Write(b, binary.BigEndian, uint32(0)); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(0))
 	// offsets
-	if err := binary.Write(b, binary.BigEndian, offsetRoot); err != nil {
-		return err
-	}
-	if err := binary.Write(b, binary.BigEndian, offsetDBDS); err != nil {
-		return err
-	}
-	if err := binary.Write(b, binary.BigEndian, offsetData); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, offsetRoot)
+	_ = binary.Write(b, binary.BigEndian, offsetDBDS)
+	_ = binary.Write(b, binary.BigEndian, offsetData)
 	// dummy 253 zero offsets
 	for i := 0; i < 253; i++ {
-		if err := binary.Write(b, binary.BigEndian, uint32(0)); err != nil {
-			return err
-		}
+		_ = binary.Write(b, binary.BigEndian, uint32(0))
 	}
-	return nil
 }
 
-func (s *Store) writeTopicDBDS(b *bytes.Buffer, index uint32) error {
+func (s *Store) writeTopicDBDS(b *bytes.Buffer, index uint32) {
 	// always one topic (DBDS)
-	if err := binary.Write(b, binary.BigEndian, uint32(1)); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, uint32(1))
 	// topic name len. Always is 4
-	if err := b.WriteByte(4); err != nil {
-		return err
-	}
+	_ = b.WriteByte(4)
 	// topic name
-	if _, err := b.Write([]byte("DSDB")); err != nil {
-		return err
-	}
+	b.Write([]byte("DSDB"))
 	// topic offset
-	if err := binary.Write(b, binary.BigEndian, uint32(index)); err != nil {
-		return err
-	}
-	return nil
+	_ = binary.Write(b, binary.BigEndian, uint32(index))
 }
 
-func (s *Store) writeFreeBlocks(b *bytes.Buffer, freeBlocks []freeBlock) error {
+func (s *Store) writeFreeBlocks(b *bytes.Buffer, freeBlocks []freeBlock) {
 	// sort blocks by size
 	s.writeFreeMapSort(freeBlocks)
 	// it is magic
 	for i := 0; i < 32; i++ {
-		// current block size (iterating block sizes 1, 2, 4, 8, 16, ..., 1024, 2048, 4096, ...)
 		var blockSize = uint32(1) << i
 		var blockCount uint32 = 0
 		for j := 0; j < len(freeBlocks); j++ {
 			power := (freeBlocks[j].size & (freeBlocks[j].size - 1)) == 0
-			// we need take blocks with size == blockSize
-			// but also we take all blocks bigger than blockSize that are not round by 2 power
-			//
-			// For example we have the following blocks allocation (globally 2 blocks - 2048-4096, 4096-8092):
-			// |             |####1024####                 |
-			// 2048          4096                          8092
-			//
-			// Used space is 4096-5120. Free space are 2048-4095 and 5121-8091 (sub part of block 4096-8092).
-			// Free blocks for blockSize == 2048 are 2048-4096 and 5120-8092 (because it can't be assinged to blocks with size >= 4096)
-			// Free blocks for blockSize == 4096 are none
-			// here we just calculate count of free blocks with needed size
 			if freeBlocks[j].size == blockSize || (freeBlocks[j].size > blockSize && !power) {
 				blockCount++
 				continue
@@ -251,17 +179,13 @@ func (s *Store) writeFreeBlocks(b *bytes.Buffer, freeBlocks []freeBlock) error {
 				break
 			}
 		}
-		if err := binary.Write(b, binary.BigEndian, uint32(blockCount)); err != nil {
-			return err
-		}
+		_ = binary.Write(b, binary.BigEndian, uint32(blockCount))
 		if blockCount > 0 {
 			// writing blocks offsets
 			for j := 0; j < len(freeBlocks); j++ {
 				power := (freeBlocks[j].size & (freeBlocks[j].size - 1)) == 0
 				if freeBlocks[j].size == blockSize || (freeBlocks[j].size > blockSize && !power) {
-					if err := binary.Write(b, binary.BigEndian, uint32(freeBlocks[j].offset)); err != nil {
-						return err
-					}
+					_ = binary.Write(b, binary.BigEndian, uint32(freeBlocks[j].offset))
 					continue
 				}
 				if freeBlocks[j].size >= blockSize {
@@ -270,91 +194,52 @@ func (s *Store) writeFreeBlocks(b *bytes.Buffer, freeBlocks []freeBlock) error {
 			}
 		}
 	}
-	return nil
 }
 
-func (s *Store) writeBlockRoot(b *bytes.Buffer, offsetRoot, offsetDBDS, offsetData uint32, freeBlocks []freeBlock) error {
+func (s *Store) writeBlockRoot(b *bytes.Buffer, offsetRoot, offsetDBDS, offsetData uint32, freeBlocks []freeBlock) {
 	// offsets
-	if err := s.writeOffsets(b, offsetRoot, offsetDBDS, offsetData); err != nil {
-		return err
-	}
+	s.writeOffsets(b, offsetRoot, offsetDBDS, offsetData)
 	// topic. index is always 1
-	if err := s.writeTopicDBDS(b, 1); err != nil {
-		return err
-	}
+	s.writeTopicDBDS(b, 1)
 	// free blocks
-	if err := s.writeFreeBlocks(b, freeBlocks); err != nil {
-		return err
-	}
+	s.writeFreeBlocks(b, freeBlocks)
 	// write extra (unknown data)
-	if _, err := b.Write(s.RootExtra); err != nil {
-		return err
-	}
-	return nil
+	b.Write(s.RootExtra)
 }
 
-func (s *Store) writeHeader(b *bytes.Buffer, offsetRoot, size uint32) error {
+func (s *Store) writeHeader(b *bytes.Buffer, offsetRoot, size uint32) {
 	// magic1
-	if err := binary.Write(b, binary.BigEndian, headerMagic1); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, headerMagic1)
 	// magic2
-	if err := binary.Write(b, binary.BigEndian, headerMagic2); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, headerMagic2)
 	// offset of root block
-	if err := binary.Write(b, binary.BigEndian, offsetRoot); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, offsetRoot)
 	// size of root block
-	if err := binary.Write(b, binary.BigEndian, size); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, size)
 	// offset of root block
-	if err := binary.Write(b, binary.BigEndian, offsetRoot); err != nil {
-		return err
-	}
+	_ = binary.Write(b, binary.BigEndian, offsetRoot)
 	// write extra
 	headerExtra := make([]byte, 16)
 	copy(headerExtra, s.HeaderExtra)
-	if _, err := b.Write(headerExtra); err != nil {
-		return err
-	}
-	// check size
-	if b.Len() != 36 {
-		return errors.New("invalid header size")
-	}
-	return nil
+	b.Write(headerExtra)
 }
 
-// WriteStore writes .DS_Store to io.Writer
+// Write writes .DS_Store to io.Writer
 func (s *Store) Write(w io.Writer) error {
 	// prepare data block
 	blockData := new(bytes.Buffer)
-	if err := s.writeBlockData(blockData, s.Records); err != nil {
-		return err
-	}
+	s.writeBlockData(blockData, s.Records)
 	// prepare DSDB block (always 2 index)
 	blockDSDB := new(bytes.Buffer)
-	if err := s.writeBlockDSDB(blockDSDB, 2); err != nil {
-		return err
-	}
+	s.writeBlockDSDB(blockDSDB, 2)
 	// prepare Root block
 	blockList := s.writeFreeMapCreate()
 	blockRoot := new(bytes.Buffer)
-	if err := s.writeBlockRoot(blockRoot, 0, 0, 0, blockList); err != nil {
-		return err
-	}
+	s.writeBlockRoot(blockRoot, 0, 0, 0, blockList)
 	// align blocks
-	if err := s.writeAlignBlock(blockData, 32); err != nil {
-		return err
-	}
-	if err := s.writeAlignBlock(blockDSDB, 32); err != nil {
-		return err
-	}
-	if err := s.writeAlignBlock(blockRoot, 32); err != nil {
-		return err
-	}
+	s.writeAlignBlock(blockData, 32)
+	s.writeAlignBlock(blockDSDB, 32)
+	s.writeAlignBlock(blockRoot, 32)
 	// create blocks map
 	blockDataOffset, blockList := s.writeFreeMapAlloc(blockList, uint32(blockData.Len()), 0)
 	blockDSDBOffset, blockList := s.writeFreeMapAlloc(blockList, uint32(blockDSDB.Len()), 0)
@@ -369,25 +254,12 @@ func (s *Store) Write(w io.Writer) error {
 	blockRootEnd := blockRootOffsetReal + blockSize(blockRootOffset)
 	// re-create root block with correct offsets
 	blockRoot.Reset()
-	if err := s.writeBlockRoot(blockRoot, blockRootOffset, blockDSDBOffset, blockDataOffset, blockList); err != nil {
-		return err
-	}
+	s.writeBlockRoot(blockRoot, blockRootOffset, blockDSDBOffset, blockDataOffset, blockList)
 	// write header
 	blockHeader := new(bytes.Buffer)
-	if err := s.writeHeader(blockHeader, blockRootOffsetReal, uint32(blockRoot.Len())); err != nil {
-		return err
-	}
+	s.writeHeader(blockHeader, blockRootOffsetReal, uint32(blockRoot.Len()))
 	// calculate file size
-	var size uint32 = 32
-	if blockRootEnd > size {
-		size = blockRootEnd
-	}
-	if blockDSDBEnd > size {
-		size = blockDSDBEnd
-	}
-	if blockDataEnd > size {
-		size = blockDataEnd
-	}
+	size := max(uint32(32), blockRootEnd, blockDSDBEnd, blockDataEnd)
 	// create full file
 	fileData := make([]byte, size+4)
 	copy(fileData[0:], blockHeader.Bytes())
@@ -402,8 +274,6 @@ func (s *Store) Write(w io.Writer) error {
 // WriteFile writes .DS_Store to the file
 func (s *Store) WriteFile(filename string, perm os.FileMode) error {
 	buffer := new(bytes.Buffer)
-	if err := s.Write(buffer); err != nil {
-		return err
-	}
+	_ = s.Write(buffer)
 	return os.WriteFile(filename, buffer.Bytes(), perm)
 }
